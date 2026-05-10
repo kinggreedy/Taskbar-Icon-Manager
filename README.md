@@ -1,8 +1,8 @@
-# Taskbar Icon Rules
+# Taskbar Icon Manager
 
 A Windhawk mod that assigns custom icons to application windows based on process name, command-line substring, and optional window-title substring.
 
-This is useful for apps that run multiple profiles or instances under the same executable, such as Firefox, Chrome, Edge, or Electron apps.
+This is useful for apps that run multiple profiles or instances under the same executable, such as Firefox, VSCode, Electron apps, ...
 
 ## Features
 
