@@ -2,7 +2,7 @@
 // @id              taskbar-icon-manager
 // @name            Taskbar icon manager
 // @description     Assign custom window/taskbar icons by process name, command-line substring, and optional window-title substring.
-// @version         0.2
+// @version         0.3
 // @author          kinggreedy
 // @include         *
 // @compilerOptions -lcomctl32 -lshell32
@@ -65,6 +65,7 @@ values can be separated with semicolons, for example:
 #include <algorithm>
 #include <cwctype>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -84,6 +85,12 @@ struct ActiveRule {
     HICON smallIcon = nullptr;
 };
 
+struct WindowIconState {
+    HWND hwnd = nullptr;
+    HICON originalLargeIcon = nullptr;
+    HICON originalSmallIcon = nullptr;
+};
+
 struct DelayedWindowJob {
     HWND hwnd = nullptr;
     DWORD generation = 0;
@@ -91,6 +98,7 @@ struct DelayedWindowJob {
 
 std::vector<UserRule> g_rules;
 std::vector<ActiveRule> g_activeRules;
+std::vector<WindowIconState> g_windowIconStates;
 CRITICAL_SECTION g_lock;
 bool g_lockReady = false;
 bool g_active = false;
@@ -364,7 +372,7 @@ std::vector<ActiveRule> CompileRulesForThisProcess(
         if (activeRule.largeIcon || activeRule.smallIcon) {
             compiled.push_back(std::move(activeRule));
         } else {
-            Wh_Log(L"[taskbar-icon-rules] Couldn't load icon: %s",
+            Wh_Log(L"[taskbar-icon-manager] Couldn't load icon: %s",
                    rule.iconSpec.c_str());
         }
     }
@@ -460,11 +468,44 @@ const ActiveRule* SelectRuleForWindowLocked(HWND hwnd) {
     return nullptr;
 }
 
-void SendIconMessage(HWND hwnd, WPARAM whichIcon, HICON icon) {
-    if (!icon) {
+HICON GetWindowIconOrClassIcon(HWND hwnd, WPARAM whichIcon) {
+    DWORD_PTR result = 0;
+    if (SendMessageTimeoutW(hwnd, WM_GETICON, whichIcon, 0,
+                            SMTO_ABORTIFHUNG | SMTO_BLOCK, 200, &result) &&
+        result) {
+        return reinterpret_cast<HICON>(result);
+    }
+
+    if (whichIcon == ICON_BIG) {
+        return reinterpret_cast<HICON>(GetClassLongPtrW(hwnd, GCLP_HICON));
+    }
+
+    return reinterpret_cast<HICON>(GetClassLongPtrW(hwnd, GCLP_HICONSM));
+}
+
+bool HasSavedWindowStateLocked(HWND hwnd) {
+    for (const WindowIconState& state : g_windowIconStates) {
+        if (state.hwnd == hwnd) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void SaveWindowStateIfNeededLocked(HWND hwnd) {
+    if (HasSavedWindowStateLocked(hwnd)) {
         return;
     }
 
+    WindowIconState state;
+    state.hwnd = hwnd;
+    state.originalLargeIcon = GetWindowIconOrClassIcon(hwnd, ICON_BIG);
+    state.originalSmallIcon = GetWindowIconOrClassIcon(hwnd, ICON_SMALL);
+    g_windowIconStates.push_back(state);
+}
+
+void SendIconMessage(HWND hwnd, WPARAM whichIcon, HICON icon) {
     DWORD_PTR ignored = 0;
     SendMessageTimeoutW(hwnd, WM_SETICON, whichIcon, reinterpret_cast<LPARAM>(icon),
                         SMTO_ABORTIFHUNG | SMTO_BLOCK, 200, &ignored);
@@ -474,6 +515,20 @@ void RefreshWindowFrame(HWND hwnd) {
     SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
                      SWP_FRAMECHANGED);
+}
+
+void RestoreTrackedWindowIconsLocked() {
+    for (const WindowIconState& state : g_windowIconStates) {
+        if (!IsWindow(state.hwnd)) {
+            continue;
+        }
+
+        SendIconMessage(state.hwnd, ICON_BIG, state.originalLargeIcon);
+        SendIconMessage(state.hwnd, ICON_SMALL, state.originalSmallIcon);
+        RefreshWindowFrame(state.hwnd);
+    }
+
+    g_windowIconStates.clear();
 }
 
 void ApplyRuleToWindow(HWND hwnd) {
@@ -498,13 +553,15 @@ void ApplyRuleToWindow(HWND hwnd) {
     HICON smallIcon = rule->smallIcon;
     std::wstring iconSpec = rule->match.iconSpec;
 
+    SaveWindowStateIfNeededLocked(hwnd);
+
     SendIconMessage(hwnd, ICON_BIG, largeIcon);
     SendIconMessage(hwnd, ICON_SMALL, smallIcon);
     RefreshWindowFrame(hwnd);
 
     LeaveCriticalSection(&g_lock);
 
-    Wh_Log(L"[taskbar-icon-rules] Applied %s to hwnd=%p", iconSpec.c_str(), hwnd);
+    Wh_Log(L"[taskbar-icon-manager] Applied %s to hwnd=%p", iconSpec.c_str(), hwnd);
 }
 
 BOOL CALLBACK ApplyAllWindowsCallback(HWND hwnd, LPARAM) {
@@ -584,6 +641,7 @@ void ReplaceActiveRules(std::vector<ActiveRule> newRules) {
 
     ++g_generation;
     g_active = false;
+    RestoreTrackedWindowIconsLocked();
     DestroyLoadedIcons(&g_activeRules);
 
     g_activeRules = std::move(newRules);
@@ -690,6 +748,7 @@ void Wh_ModBeforeUninit() {
     g_unloading = true;
     g_active = false;
     ++g_generation;
+    RestoreTrackedWindowIconsLocked();
     LeaveCriticalSection(&g_lock);
 }
 
@@ -699,6 +758,7 @@ void Wh_ModUninit() {
     }
 
     EnterCriticalSection(&g_lock);
+    RestoreTrackedWindowIconsLocked();
     DestroyLoadedIcons(&g_activeRules);
     g_rules.clear();
     LeaveCriticalSection(&g_lock);
