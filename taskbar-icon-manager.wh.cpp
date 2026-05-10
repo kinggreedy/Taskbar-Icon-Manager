@@ -2,7 +2,7 @@
 // @id              taskbar-icon-manager
 // @name            Taskbar icon manager
 // @description     Assign custom window/taskbar icons by process name, command-line substring, and optional window-title substring.
-// @version         0.1
+// @version         0.2
 // @author          kinggreedy
 // @include         *
 // @compilerOptions -lcomctl32 -lshell32
@@ -14,7 +14,8 @@
 # Taskbar icon manager
 
 Assign icons to app windows using rules. A rule can match by process name,
-command-line substring, and optionally by window-title substring.
+command-line substring, and optionally by window-title substring. Rules can also
+exclude windows by command-line or title substring.
 
 Icon values can be:
 
@@ -26,7 +27,10 @@ If more than one rule matches a process, title-specific rules are checked first
 for each window. If no title-specific rule matches, the first matching rule with
 an empty title is used.
 
-If you use a taskbar ungrouping mod, enable its option to use window icons.
+Use `excludeCmdline` and `excludeTitle` to skip matching rules. Multiple exclude
+values can be separated with semicolons, for example:
+
+`New Private Tab;Mozilla Firefox Private Browsing`
 */
 // ==/WindhawkModReadme==
 
@@ -42,6 +46,12 @@ If you use a taskbar ungrouping mod, enable its option to use window icons.
     - title: ""
       $name: "Window-title substring"
       $description: "Optional. Used to distinguish windows from the same process."
+    - excludeCmdline: ""
+      $name: "Exclude command-line substring"
+      $description: "Optional. Skip this rule if the command line contains this text. Use semicolons for multiple values."
+    - excludeTitle: ""
+      $name: "Exclude window-title substring"
+      $description: "Optional. Skip this rule for windows whose title contains this text. Use semicolons for multiple values."
     - icon: ""
       $name: "Icon path"
       $description: "An .ico path, or an executable/DLL path with an icon index, for example: app.exe,0."
@@ -63,6 +73,8 @@ struct UserRule {
     std::wstring processName;
     std::wstring commandLinePart;
     std::wstring titlePart;
+    std::wstring excludeCommandLineParts;
+    std::wstring excludeTitleParts;
     std::wstring iconSpec;
 };
 
@@ -108,6 +120,55 @@ bool ContainsInsensitive(const std::wstring& haystack,
     }
 
     return ToLower(haystack).find(ToLower(needle)) != std::wstring::npos;
+}
+
+std::wstring TrimWhitespace(const std::wstring& value) {
+    size_t first = 0;
+    while (first < value.length() && std::iswspace(value[first])) {
+        ++first;
+    }
+
+    size_t last = value.length();
+    while (last > first && std::iswspace(value[last - 1])) {
+        --last;
+    }
+
+    return value.substr(first, last - first);
+}
+
+std::vector<std::wstring> SplitSemicolonList(const std::wstring& value) {
+    std::vector<std::wstring> parts;
+    size_t start = 0;
+
+    while (start <= value.length()) {
+        size_t end = value.find(L';', start);
+        std::wstring part = value.substr(
+            start, end == std::wstring::npos ? std::wstring::npos : end - start);
+
+        part = TrimWhitespace(part);
+        if (!part.empty()) {
+            parts.push_back(part);
+        }
+
+        if (end == std::wstring::npos) {
+            break;
+        }
+
+        start = end + 1;
+    }
+
+    return parts;
+}
+
+bool ContainsAnySemicolonValueInsensitive(const std::wstring& haystack,
+                                          const std::wstring& semicolonList) {
+    for (const std::wstring& item : SplitSemicolonList(semicolonList)) {
+        if (ContainsInsensitive(haystack, item)) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 std::wstring ExpandEnvStrings(const std::wstring& value) {
@@ -169,10 +230,14 @@ std::vector<UserRule> LoadUserRules() {
         rule.processName = TakeSetting(L"rules[%d].process", i);
         rule.commandLinePart = TakeSetting(L"rules[%d].cmdline", i);
         rule.titlePart = TakeSetting(L"rules[%d].title", i);
+        rule.excludeCommandLineParts = TakeSetting(L"rules[%d].excludeCmdline", i);
+        rule.excludeTitleParts = TakeSetting(L"rules[%d].excludeTitle", i);
         rule.iconSpec = TakeSetting(L"rules[%d].icon", i);
 
         bool blankRule = rule.processName.empty() && rule.commandLinePart.empty() &&
-                         rule.titlePart.empty() && rule.iconSpec.empty();
+                         rule.titlePart.empty() &&
+                         rule.excludeCommandLineParts.empty() &&
+                         rule.excludeTitleParts.empty() && rule.iconSpec.empty();
         if (blankRule) {
             break;
         }
@@ -271,6 +336,12 @@ bool RuleMatchesThisProcess(const UserRule& rule,
         return false;
     }
 
+    if (!rule.excludeCommandLineParts.empty() &&
+        ContainsAnySemicolonValueInsensitive(commandLine,
+                                             rule.excludeCommandLineParts)) {
+        return false;
+    }
+
     return true;
 }
 
@@ -352,6 +423,12 @@ const ActiveRule* SelectRuleForWindowLocked(HWND hwnd) {
     if (needsTitle) {
         std::wstring title = WindowTitle(hwnd);
         for (const ActiveRule& rule : g_activeRules) {
+            if (!rule.match.excludeTitleParts.empty() &&
+                ContainsAnySemicolonValueInsensitive(title,
+                                                     rule.match.excludeTitleParts)) {
+                continue;
+            }
+
             if (!rule.match.titlePart.empty() &&
                 ContainsInsensitive(title, rule.match.titlePart)) {
                 return &rule;
@@ -359,8 +436,23 @@ const ActiveRule* SelectRuleForWindowLocked(HWND hwnd) {
         }
     }
 
+    std::wstring title;
+    bool titleFetched = false;
+
     for (const ActiveRule& rule : g_activeRules) {
         if (rule.match.titlePart.empty()) {
+            if (!rule.match.excludeTitleParts.empty()) {
+                if (!titleFetched) {
+                    title = WindowTitle(hwnd);
+                    titleFetched = true;
+                }
+
+                if (ContainsAnySemicolonValueInsensitive(
+                        title, rule.match.excludeTitleParts)) {
+                    continue;
+                }
+            }
+
             return &rule;
         }
     }
