@@ -31,11 +31,18 @@ Use `excludeCmdline` and `excludeTitle` to skip matching rules. Multiple exclude
 values can be separated with semicolons, for example:
 
 `New Private Tab;Mozilla Firefox Private Browsing`
+
+The **Restore original icons on unload (Beta)** option is disabled by default.
+When enabled, the mod records the original icon for each changed window and tries
+to restore it when the mod is disabled, unloaded, or settings are reloaded.
 */
 // ==/WindhawkModReadme==
 
 // ==WindhawkModSettings==
 /*
+- restoreIcons: false
+  $name: "Restore original icons on unload (Beta)"
+  $description: "Off by default. Records original window icons and tries to restore them when the mod is disabled, unloaded, or settings are reloaded."
 - rules:
   - - process: ""
       $name: "Process name"
@@ -103,6 +110,7 @@ CRITICAL_SECTION g_lock;
 bool g_lockReady = false;
 bool g_active = false;
 bool g_unloading = false;
+bool g_restoreIcons = false;
 DWORD g_processId = 0;
 DWORD g_generation = 1;
 
@@ -494,7 +502,7 @@ bool HasSavedWindowStateLocked(HWND hwnd) {
 }
 
 void SaveWindowStateIfNeededLocked(HWND hwnd) {
-    if (HasSavedWindowStateLocked(hwnd)) {
+    if (!g_restoreIcons || HasSavedWindowStateLocked(hwnd)) {
         return;
     }
 
@@ -636,7 +644,7 @@ void QueueProcessRefresh() {
                       WT_EXECUTEDEFAULT);
 }
 
-void ReplaceActiveRules(std::vector<ActiveRule> newRules) {
+void ReplaceActiveRules(std::vector<ActiveRule> newRules, bool restoreIcons) {
     EnterCriticalSection(&g_lock);
 
     ++g_generation;
@@ -644,6 +652,7 @@ void ReplaceActiveRules(std::vector<ActiveRule> newRules) {
     RestoreTrackedWindowIconsLocked();
     DestroyLoadedIcons(&g_activeRules);
 
+    g_restoreIcons = restoreIcons;
     g_activeRules = std::move(newRules);
     g_active = !g_activeRules.empty();
 
@@ -656,6 +665,7 @@ void ReplaceActiveRules(std::vector<ActiveRule> newRules) {
 }
 
 void ReloadConfiguration() {
+    bool restoreIcons = Wh_GetBoolSetting(L"restoreIcons") != FALSE;
     std::vector<UserRule> loadedRules = LoadUserRules();
     std::vector<ActiveRule> processRules = CompileRulesForThisProcess(loadedRules);
 
@@ -663,7 +673,7 @@ void ReloadConfiguration() {
     g_rules = std::move(loadedRules);
     LeaveCriticalSection(&g_lock);
 
-    ReplaceActiveRules(std::move(processRules));
+    ReplaceActiveRules(std::move(processRules), restoreIcons);
 }
 
 HWND WINAPI CreateWindowExW_Hook(DWORD exStyle, LPCWSTR className,
