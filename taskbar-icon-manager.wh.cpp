@@ -665,7 +665,7 @@ void ReplaceActiveRules(std::vector<ActiveRule> newRules, bool restoreIcons) {
 }
 
 void ReloadConfiguration() {
-    bool restoreIcons = Wh_GetBoolSetting(L"restoreIcons") != FALSE;
+    bool restoreIcons = Wh_GetIntSetting(L"restoreIcons") != 0;
     std::vector<UserRule> loadedRules = LoadUserRules();
     std::vector<ActiveRule> processRules = CompileRulesForThisProcess(loadedRules);
 
